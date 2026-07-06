@@ -10,6 +10,7 @@
 // @updateURL    https://raw.githubusercontent.com/jakobkogler/browser-scripts/main/helloquiz/helloquiz-anki-timer.js
 // @downloadURL  https://raw.githubusercontent.com/jakobkogler/browser-scripts/main/helloquiz/helloquiz-anki-timer.js
 // @grant        none
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
@@ -49,7 +50,7 @@
   let currentQuizTitle = '';
   let timedOut = false;
   let buttonsWerePresent = false;
-  let pendingReview = false;
+  let pendingReview = true; // start paused: first question waits for a click
   let overlayEl = null;
 
   // Timer bookkeeping for pause/resume on tab switch
@@ -68,10 +69,6 @@
 
   function findQuestionEl() {
     return document.querySelector('.quiz-module__HPadfW__content h2');
-  }
-
-  function findContentEl() {
-    return document.querySelector('.quiz-module__HPadfW__content');
   }
 
   function findQuizTitleEl() {
@@ -224,14 +221,45 @@
     resumeTimer();
   }
 
+  // ---------- Question hiding (CSS-based, flash-free) ----------
+
+  // A class on <html> + stylesheet rule hides the question content. The
+  // class is applied at document-start, BEFORE the page renders anything,
+  // so the question is never visible even on a fresh page load. Using
+  // <html> instead of <body> because <body> doesn't exist yet at
+  // document-start.
+
+  const HIDE_CLASS = 'hq-timer-hide-question';
+
+  function installHideStyle() {
+    const style = document.createElement('style');
+    style.textContent = `
+      html.${HIDE_CLASS} .quiz-module__HPadfW__content {
+        visibility: hidden !important;
+      }
+    `;
+    document.documentElement.appendChild(style);
+  }
+
+  function hideQuestion() {
+    document.documentElement.classList.add(HIDE_CLASS);
+  }
+
+  function showQuestion() {
+    document.documentElement.classList.remove(HIDE_CLASS);
+  }
+
+  // Apply immediately at document-start, before first render
+  installHideStyle();
+  hideQuestion();
+
   // ---------- Review pause (after wrong answer) ----------
 
   function markPendingReview(reason) {
     pendingReview = true;
-    // Pre-hide immediately so the next question text is never visible,
+    // Hide immediately so the next question text is never visible,
     // even for a frame.
-    const contentEl = findContentEl();
-    if (contentEl) contentEl.style.visibility = 'hidden';
+    hideQuestion();
     if (DEBUG) console.log('[helloquiz-timer] pending review (' + reason + '), will pause before next timer start');
   }
 
@@ -240,8 +268,7 @@
     if (!container) return;
 
     // Hide the question text so the next answer isn't revealed
-    const contentEl = findContentEl();
-    if (contentEl) contentEl.style.visibility = 'hidden';
+    hideQuestion();
 
     // Full-screen transparent button — map stays visible, any click continues
     const btn = document.createElement('button');
@@ -276,8 +303,7 @@
     overlayEl = null;
 
     // Restore question text visibility
-    const contentEl = findContentEl();
-    if (contentEl) contentEl.style.visibility = '';
+    showQuestion();
   }
 
   function proceedFromOverlay() {
@@ -328,7 +354,6 @@
     if (DEBUG) console.log('[helloquiz-timer] full reset (' + reason + ')');
     clearTimer();
     hideReviewOverlay();
-    pendingReview = false;
     timedOut = false;
     buttonsWerePresent = false;
     // Drop stale bar references so a fresh one gets created in the new DOM
@@ -337,6 +362,9 @@
     }
     timerBar = null;
     timerBarWrap = null;
+    // New quiz starts paused too: wait for a click before showing the
+    // question and starting the timer.
+    markPendingReview('quiz start');
     // Force question re-detection
     currentQuestionText = '__forced_reset__' + Math.random();
   }
@@ -351,6 +379,34 @@
         fullReset('quiz changed to "' + title + '"');
       }
     }
+  }
+
+  // ---------- Instant SPA navigation detection ----------
+
+  // The 200ms poll is too slow to hide the question when navigating
+  // between pages (e.g. from the /learn list into a quiz): the new
+  // question renders before the poll notices the change. pushState fires
+  // synchronously at the moment of the click, BEFORE the new content
+  // renders, so hooking it lets us hide/reset with zero visible flash.
+
+  let lastUrl = location.href;
+
+  function onUrlChange() {
+    if (location.href === lastUrl) return;
+    lastUrl = location.href;
+    fullReset('url changed to ' + location.pathname);
+  }
+
+  function installHistoryHook() {
+    ['pushState', 'replaceState'].forEach((fnName) => {
+      const orig = history[fnName].bind(history);
+      history[fnName] = function (...args) {
+        const ret = orig(...args);
+        try { onUrlChange(); } catch (e) { /* never break navigation */ }
+        return ret;
+      };
+    });
+    window.addEventListener('popstate', onUrlChange);
   }
 
   function watchForNewQuestion() {
@@ -369,6 +425,11 @@
         const quizContainer = findQuizContainer() || container;
         showReviewOverlay(quizContainer);
       } else {
+        // Timer disabled or no review pending: make sure the question is
+        // visible (otherwise a pendingReview set while stopped would keep
+        // it hidden with no overlay to dismiss).
+        pendingReview = false;
+        showQuestion();
         startTimer(container);
       }
     }
@@ -416,7 +477,9 @@
 
     setTimeout(() => {
       hideReviewOverlay();
-      pendingReview = false;
+      // Navigation (next question preview / next quiz / practice more)
+      // also starts paused: wait for a click before revealing the question.
+      markPendingReview('nav');
       currentQuestionText = '__forced_reset__' + Math.random();
       watchForNewQuestion();
     }, 250);
@@ -544,6 +607,7 @@
   function init() {
     makeControlPanel();
     installConsoleHook();
+    installHistoryHook();
     document.addEventListener('click', onPossibleNavClick, true);
     document.addEventListener('click', onPossibleAgainClick, true);
     document.addEventListener('keydown', onOverlayKeydown, true);
