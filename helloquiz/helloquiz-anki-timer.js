@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HelloQuiz Anki Timer
 // @namespace    http://tampermonkey.net/
-// @version      2026-07-06
+// @version      1.0.0
 // @description  Adjustable countdown per question. If you find the correct province after time's up, auto-clicks "again" instead of letting you grade it normally.
 // @author       Jakube
 // @match        https://helloquiz.app/quiz/*?learn
@@ -270,23 +270,26 @@
     // Hide the question text so the next answer isn't revealed
     hideQuestion();
 
-    // Full-screen transparent button — map stays visible, any click continues
+    // Small floating button instead of a full-screen click-catcher, so the
+    // map stays fully interactive (pan/zoom) while studying the mistake.
     const btn = document.createElement('button');
-    btn.textContent = 'click anywhere to continue (1)';
+    btn.textContent = 'next question (click map / 1)';
     btn.style.cssText = `
       position: fixed;
-      inset: 0;
-      width: 100%;
-      height: 100%;
+      top: 60px;
+      left: 50%;
+      transform: translateX(-50%);
       z-index: 10000;
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      color: rgba(255, 255, 255, 0.7);
-      font-size: 18px;
+      padding: 10px 24px;
+      font-size: 16px;
       font-weight: 600;
       font-family: system-ui, sans-serif;
-      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+      border: none;
+      border-radius: 8px;
+      background: #2980b9;
+      color: #fff;
+      cursor: pointer;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
     `;
     btn.addEventListener('click', proceedFromOverlay);
 
@@ -311,6 +314,78 @@
     pendingReview = false;
     const container = findMapContainer();
     if (container) startTimer(container);
+  }
+
+  // ---------- Map interaction during review ----------
+
+  // While the review button is up, the map stays interactive. A plain
+  // click (tap) on the map acts as "continue": it's swallowed so the site
+  // can't register it as an answer to the still-hidden question, and then
+  // proceeds to reveal the question and start the timer. A click-hold-move
+  // (drag) pans the map normally without continuing.
+
+  const TAP_THRESHOLD_PX = 5;
+  let reviewPointerDown = null;
+  let suppressMapClicksUntil = 0;
+
+  function onReviewPointerDown(e) {
+    if (!overlayEl) return;
+    const container = findMapContainer();
+    if (container && container.contains(e.target)) {
+      reviewPointerDown = { x: e.clientX, y: e.clientY };
+    } else {
+      reviewPointerDown = null;
+    }
+  }
+
+  function onReviewPointerUp(e) {
+    if (!overlayEl || !reviewPointerDown) return;
+    const dx = e.clientX - reviewPointerDown.x;
+    const dy = e.clientY - reviewPointerDown.y;
+    reviewPointerDown = null;
+
+    const isTap = dx * dx + dy * dy <= TAP_THRESHOLD_PX * TAP_THRESHOLD_PX;
+    if (!isTap) return; // drag: let the map pan freely
+
+    // Swallow the tap so deck.gl never sees the release, and suppress the
+    // trailing click event the browser will still fire.
+    e.stopPropagation();
+    e.preventDefault();
+    suppressMapClicksUntil = Date.now() + 350;
+
+    // Swallowing the pointerup leaves the gesture recognizer thinking the
+    // pointer is still down (sticky drag mode). A synthetic pointercancel
+    // tells it to cleanly abort the interaction: no tap, no stuck drag.
+    try {
+      const cancel = new PointerEvent('pointercancel', {
+        bubbles: true,
+        cancelable: false,
+        pointerId: e.pointerId,
+        pointerType: e.pointerType,
+        isPrimary: e.isPrimary,
+        clientX: e.clientX,
+        clientY: e.clientY,
+      });
+      e.target.dispatchEvent(cancel);
+    } catch (err) {
+      /* best effort - proceed regardless */
+    }
+
+    if (DEBUG) console.log('[helloquiz-timer] map tap during review -> continue');
+    proceedFromOverlay();
+  }
+
+  function onReviewMapClickBlock(e) {
+    // Block plain clicks inside the map while reviewing, and briefly after
+    // a tap-to-continue (the browser fires the click AFTER our pointerup
+    // handler has already removed the overlay).
+    if (!overlayEl && Date.now() >= suppressMapClicksUntil) return;
+    const container = findMapContainer();
+    if (container && container.contains(e.target)) {
+      e.stopPropagation();
+      e.preventDefault();
+      if (DEBUG) console.log('[helloquiz-timer] blocked map click during review');
+    }
   }
 
   // ---------- Console hook (detect correct/incorrect) ----------
@@ -673,6 +748,9 @@
     installHistoryHook();
     document.addEventListener('click', onPossibleNavClick, true);
     document.addEventListener('click', onPossibleAgainClick, true);
+    document.addEventListener('click', onReviewMapClickBlock, true);
+    document.addEventListener('pointerdown', onReviewPointerDown, true);
+    document.addEventListener('pointerup', onReviewPointerUp, true);
     document.addEventListener('keydown', onOverlayKeydown, true);
     document.addEventListener('keydown', onAgainKeydown, true);
     document.addEventListener('keydown', onNavKeydown, true);
