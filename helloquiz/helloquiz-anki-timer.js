@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HelloQuiz Anki Timer
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.0.1
 // @description  Adjustable countdown per question. If you find the correct province after time's up, auto-clicks "again" instead of letting you grade it normally.
 // @author       Jakube
 // @match        https://helloquiz.app/quiz/*?learn
@@ -52,6 +52,7 @@
   let buttonsWerePresent = false;
   let pendingReview = true; // start paused: first question waits for a click
   let overlayEl = null;
+  let panelEl = null;
 
   // Timer bookkeeping for pause/resume on tab switch
   let timerDeadline = 0;      // Date.now() when timer would expire
@@ -270,30 +271,34 @@
     // Hide the question text so the next answer isn't revealed
     hideQuestion();
 
-    // Small floating button instead of a full-screen click-catcher, so the
-    // map stays fully interactive (pan/zoom) while studying the mistake.
+    // Compact button placed inside the control panel (left of the timer
+    // config), so it doesn't cover the quiz title or the map.
     const btn = document.createElement('button');
     btn.textContent = 'next question (click map / 1)';
     btn.style.cssText = `
-      position: fixed;
-      top: 60px;
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 10000;
-      padding: 10px 24px;
-      font-size: 16px;
+      padding: 3px 10px;
+      font-size: 13px;
       font-weight: 600;
       font-family: system-ui, sans-serif;
       border: none;
-      border-radius: 8px;
+      border-radius: 4px;
       background: #2980b9;
       color: #fff;
       cursor: pointer;
-      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+      white-space: nowrap;
     `;
     btn.addEventListener('click', proceedFromOverlay);
 
-    document.body.appendChild(btn);
+    if (panelEl && document.body.contains(panelEl)) {
+      panelEl.insertBefore(btn, panelEl.firstChild);
+    } else {
+      // Fallback if the panel isn't there for some reason
+      btn.style.position = 'fixed';
+      btn.style.top = '10px';
+      btn.style.right = '10px';
+      btn.style.zIndex = '100000';
+      document.body.appendChild(btn);
+    }
     overlayEl = btn;
 
     if (DEBUG) console.log('[helloquiz-timer] showing review button, timer paused');
@@ -738,6 +743,13 @@
     panel.appendChild(label);
     panel.appendChild(toggleBtn);
     document.body.appendChild(panel);
+    panelEl = panel;
+
+    // If a review button was showing when the panel got recreated,
+    // re-attach it so it isn't lost.
+    if (overlayEl) {
+      panel.insertBefore(overlayEl, panel.firstChild);
+    }
   }
 
   // ---------- Init ----------
@@ -759,6 +771,11 @@
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('focus', onWindowFocus);
     setInterval(() => {
+      // Watchdog: Next.js hydration or navigation can remove nodes we
+      // appended to <body>. Recreate the panel if it's gone.
+      if (!panelEl || !document.body.contains(panelEl)) {
+        makeControlPanel();
+      }
       watchForQuizChange();
       watchForNewQuestion();
       watchForGradingButtons();
