@@ -1,9 +1,12 @@
 // ==UserScript==
-// @name         helloquiz anki timer
-// @namespace    helloquiz-anki-timer
-// @version      4.0
+// @name         HelloQuiz Anki Timer
+// @namespace    http://tampermonkey.net/
+// @version      2026-07-06
 // @description  Adjustable countdown per question. If you find the correct province after time's up, auto-clicks "again" instead of letting you grade it normally.
-// @match        https://helloquiz.app/*
+// @author       Jakube
+// @match        https://helloquiz.app/quiz/*?learn
+// @match        https://helloquiz.app/learn
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=helloquiz.app
 // @updateURL    https://raw.githubusercontent.com/jakobkogler/browser-scripts/main/helloquiz/helloquiz-anki-timer.js
 // @downloadURL  https://raw.githubusercontent.com/jakobkogler/browser-scripts/main/helloquiz/helloquiz-anki-timer.js
 // @grant        none
@@ -12,6 +15,9 @@
 (function () {
   'use strict';
 
+  const DEBUG = true;
+  const NAV_BUTTON_SYMBOLS = ['▶', '⇋', '→'];
+
   let TIMER_SECONDS = 10;
   let running = true;
 
@@ -19,6 +25,14 @@
   let currentQuestionText = '';
   let timedOut = false;
   let buttonsWerePresent = false;
+  let pendingReview = false;
+  let overlayEl = null;
+
+  // ---------- DOM finders ----------
+
+  function findQuizContainer() {
+    return document.querySelector('.quiz-module__HPadfW__mapQuiz');
+  }
 
   function findMapContainer() {
     return document.querySelector('.map-quiz-module__gooF1W__map');
@@ -33,6 +47,8 @@
     if (!container) return null;
     return container.querySelector('button[title="1"]');
   }
+
+  // ---------- Timer bar ----------
 
   function makeTimerBar(container) {
     const wrap = document.createElement('div');
@@ -107,6 +123,105 @@
     }, TIMER_SECONDS * 1000);
   }
 
+  // ---------- Review overlay (after wrong answer) ----------
+
+  function findContentEl() {
+    return document.querySelector('.quiz-module__HPadfW__content');
+  }
+
+  function showReviewOverlay(container) {
+    hideReviewOverlay();
+    if (!container) return;
+
+    // Hide the question text so the next answer isn't revealed
+    const contentEl = findContentEl();
+    if (contentEl) contentEl.style.visibility = 'hidden';
+
+    // Full-screen transparent button — map stays visible, any click continues
+    const btn = document.createElement('button');
+    btn.textContent = 'click anywhere to continue (1)';
+    btn.style.cssText = `
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 10000;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 18px;
+      font-weight: 600;
+      font-family: system-ui, sans-serif;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+    `;
+    btn.addEventListener('click', proceedFromOverlay);
+
+    document.body.appendChild(btn);
+    overlayEl = btn;
+
+    if (DEBUG) console.log('[helloquiz-timer] showing review button, timer paused');
+  }
+
+  function hideReviewOverlay() {
+    if (overlayEl && overlayEl.parentNode) {
+      overlayEl.parentNode.removeChild(overlayEl);
+    }
+    overlayEl = null;
+
+    // Restore question text visibility
+    const contentEl = findContentEl();
+    if (contentEl) contentEl.style.visibility = '';
+  }
+
+  function proceedFromOverlay() {
+    hideReviewOverlay();
+    pendingReview = false;
+    const container = findMapContainer();
+    if (container) startTimer(container);
+  }
+
+  // ---------- Console hook (detect correct/incorrect) ----------
+
+  function onAnswerDetected(args) {
+    // The site logs: console.log(0, 'correct') or console.log(0, 'incorrect')
+    // Only check string args — skip objects to avoid expensive JSON.stringify
+    for (let i = 0; i < args.length; i++) {
+      if (typeof args[i] !== 'string') continue;
+      const s = args[i].toLowerCase();
+      if (s === 'incorrect') {
+        if (DEBUG) console.debug('[helloquiz-timer] INCORRECT answer detected');
+        clearTimer();
+        pendingReview = true;
+        // Pre-hide immediately so the next question text is never visible
+        const contentEl = findContentEl();
+        if (contentEl) contentEl.style.visibility = 'hidden';
+        return;
+      }
+      if (s === 'correct') {
+        if (DEBUG) console.debug('[helloquiz-timer] correct answer detected');
+        clearTimer();
+        return;
+      }
+    }
+  }
+
+  function installConsoleHook() {
+    ['log', 'warn', 'info', 'debug'].forEach((method) => {
+      const original = console[method].bind(console);
+      console[method] = function (...args) {
+        original(...args);
+        try {
+          onAnswerDetected(args);
+        } catch (err) {
+          /* swallow - never let our hook break the page's own logging */
+        }
+      };
+    });
+  }
+
+  // ---------- Watchers ----------
+
   function watchForNewQuestion() {
     const qEl = findQuestionEl();
     const container = findMapContainer();
@@ -114,13 +229,14 @@
 
     if (qEl.textContent !== currentQuestionText) {
       currentQuestionText = qEl.textContent;
-      // Don't assume no buttons are present - the previous question's
-      // grading buttons can still be mid-fade-out in the DOM right as the
-      // next question renders. Recording their real state here prevents
-      // that leftover from being misread as a fresh "answer" transition,
-      // which was wrongly clearing the just-started timer.
       buttonsWerePresent = !!findAgainButton();
-      startTimer(container);
+
+      if (running && pendingReview) {
+        const quizContainer = findQuizContainer() || container;
+        showReviewOverlay(quizContainer);
+      } else {
+        startTimer(container);
+      }
     }
   }
 
@@ -128,12 +244,13 @@
     const again = findAgainButton();
     const buttonsPresent = !!again;
 
-    // Only act at the exact transition from "no buttons" -> "buttons appeared".
-    // This is the moment the user answered, so it's the only moment
-    // `timedOut` should be trusted.
     if (buttonsPresent && !buttonsWerePresent) {
-      clearTimer(); // stop the countdown now that an answer was given
+      // Buttons just appeared — the user answered correctly on the map.
+      clearTimer();
       if (running && timedOut) {
+        pendingReview = true;
+        const contentEl = findContentEl();
+        if (contentEl) contentEl.style.visibility = 'hidden';
         again.click();
       }
     }
@@ -141,39 +258,7 @@
     buttonsWerePresent = buttonsPresent;
   }
 
-  function onAnswerDetected(args) {
-    // Site logs something like: 0 'correct'  or  0 'incorrect'
-    // Checking for "correct" as a substring covers both cases (since
-    // "incorrect" also contains "correct"), which is all we need - either
-    // one means an answer was just given, so stop the countdown now.
-    const text = args.map((a) => {
-      try {
-        return typeof a === 'string' ? a : JSON.stringify(a);
-      } catch (e) {
-        return String(a);
-      }
-    }).join(' ').toLowerCase();
-
-    if (text.includes('correct')) {
-      if (DEBUG) console.debug('[helloquiz-timer] answer detected via console log, stopping timer');
-      clearTimer();
-    }
-  }
-
-  function installConsoleHook() {
-    const originalLog = console.log.bind(console);
-    console.log = function (...args) {
-      originalLog(...args);
-      try {
-        onAnswerDetected(args);
-      } catch (err) {
-        /* swallow - never let our hook break the page's own logging */
-      }
-    };
-  }
-
-  const NAV_BUTTON_SYMBOLS = ['▶', '⇋', '→'];
-  const DEBUG = true;
+  // ---------- Nav button detection (▶ ⇋ →) ----------
 
   function isNavButton(el) {
     if (!el || !el.textContent) return false;
@@ -182,9 +267,6 @@
   }
 
   function onPossibleNavClick(e) {
-    // Don't assume it's a <button>/<a> - icon-only controls are often a
-    // plain <div>/<span> with a click handler. Walk up a few ancestors
-    // checking each one's own trimmed text.
     let el = e.target;
     let depth = 0;
     let matched = null;
@@ -197,20 +279,58 @@
       depth++;
     }
 
-    if (DEBUG) {
-      console.log('[helloquiz-timer] click target:', e.target,
-        'textContent:', JSON.stringify(e.target.textContent),
-        'outerHTML:', e.target.outerHTML,
-        'nav match:', matched);
+    if (DEBUG && matched) {
+      console.log('[helloquiz-timer] nav button matched:', matched.textContent.trim());
     }
 
     if (!matched) return;
 
     setTimeout(() => {
       if (DEBUG) console.log('[helloquiz-timer] forcing resync after nav click');
+      hideReviewOverlay();
+      pendingReview = false;
       currentQuestionText = '__forced_reset__' + Math.random();
       watchForNewQuestion();
     }, 250);
+  }
+
+  // ---------- Again-button detection ----------
+
+  function onPossibleAgainClick(e) {
+    const btn = e.target.closest && e.target.closest('button[title="1"]');
+    if (btn) {
+      pendingReview = true;
+      const contentEl = findContentEl();
+      if (contentEl) contentEl.style.visibility = 'hidden';
+      if (DEBUG) console.log('[helloquiz-timer] "again" grading detected, will pause before next timer start');
+    }
+  }
+
+  // ---------- Keyboard handlers ----------
+
+  function onOverlayKeydown(e) {
+    if (!overlayEl) return;
+    if (e.key === '1') {
+      e.preventDefault();
+      proceedFromOverlay();
+    }
+  }
+
+  function onAgainKeydown(e) {
+    // Catch keyboard shortcut for "again" (key "1") from the user's other
+    // userscript. Only fire when grading buttons are actually visible, the
+    // overlay isn't showing, and focus isn't in an input field (otherwise
+    // typing "15" into the timer seconds field would falsely trigger this).
+    if (e.key !== '1') return;
+    if (overlayEl) return;
+    const tag = (document.activeElement || {}).tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (!findAgainButton()) return;
+
+    pendingReview = true;
+    const contentEl = findContentEl();
+    if (contentEl) contentEl.style.visibility = 'hidden';
+    if (DEBUG) console.log('[helloquiz-timer] "again" grading detected via keyboard, will pause before next timer start');
   }
 
   // ---------- Control panel ----------
@@ -256,7 +376,6 @@
       const val = parseFloat(input.value);
       if (!isNaN(val) && val > 0) {
         TIMER_SECONDS = val;
-        // restart timer for current question with new duration
         const container = findMapContainer();
         if (container) startTimer(container);
       } else {
@@ -296,10 +415,15 @@
     document.body.appendChild(panel);
   }
 
+  // ---------- Init ----------
+
   function init() {
     makeControlPanel();
     installConsoleHook();
     document.addEventListener('click', onPossibleNavClick, true);
+    document.addEventListener('click', onPossibleAgainClick, true);
+    document.addEventListener('keydown', onOverlayKeydown, true);
+    document.addEventListener('keydown', onAgainKeydown, true);
     setInterval(() => {
       watchForNewQuestion();
       watchForGradingButtons();
