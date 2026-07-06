@@ -4,6 +4,8 @@
 // @version      4.0
 // @description  Adjustable countdown per question. If you find the correct province after time's up, auto-clicks "again" instead of letting you grade it normally.
 // @match        https://helloquiz.app/*
+// @updateURL    https://raw.githubusercontent.com/jakobkogler/browser-scripts/main/helloquiz/helloquiz-anki-timer.js
+// @downloadURL  https://raw.githubusercontent.com/jakobkogler/browser-scripts/main/helloquiz/helloquiz-anki-timer.js
 // @grant        none
 // ==/UserScript==
 

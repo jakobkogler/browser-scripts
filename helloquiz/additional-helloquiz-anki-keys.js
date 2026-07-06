@@ -7,6 +7,8 @@
 // @match        https://helloquiz.app/quiz/*?learn
 // @match        https://helloquiz.app/learn
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=helloquiz.app
+// @updateURL    https://raw.githubusercontent.com/jakobkogler/browser-scripts/main/helloquiz/additional-helloquiz-anki-keys.js
+// @downloadURL  https://raw.githubusercontent.com/jakobkogler/browser-scripts/main/helloquiz/additional-helloquiz-anki-keys.js
 // @grant        none
 // ==/UserScript==
 
