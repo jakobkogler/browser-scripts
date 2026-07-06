@@ -15,18 +15,46 @@
 (function () {
   'use strict';
 
-  const DEBUG = true;
+  const DEBUG = false;
   const NAV_BUTTON_SYMBOLS = ['▶', '⇋', '→'];
+  const STORAGE_KEY = 'helloquiz-anki-timer-settings';
 
-  let TIMER_SECONDS = 10;
-  let running = true;
+  // ---------- Persisted settings ----------
 
-  let timerBar, timerInterval, timeoutHandle;
+  function loadSettings() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch (e) { /* corrupted or unavailable - use defaults */ }
+    return {};
+  }
+
+  function saveSettings() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        seconds: TIMER_SECONDS,
+        running: running,
+      }));
+    } catch (e) { /* storage unavailable - not critical */ }
+  }
+
+  const saved = loadSettings();
+  let TIMER_SECONDS = typeof saved.seconds === 'number' && saved.seconds > 0 ? saved.seconds : 10;
+  let running = typeof saved.running === 'boolean' ? saved.running : true;
+
+  // ---------- State ----------
+
+  let timerBar, timerBarWrap, timerInterval, timeoutHandle;
   let currentQuestionText = '';
+  let currentQuizTitle = '';
   let timedOut = false;
   let buttonsWerePresent = false;
   let pendingReview = false;
   let overlayEl = null;
+
+  // Timer bookkeeping for pause/resume on tab switch
+  let timerDeadline = 0;      // Date.now() when timer would expire
+  let pausedRemaining = null; // seconds left when paused, or null if not paused
 
   // ---------- DOM finders ----------
 
@@ -42,6 +70,14 @@
     return document.querySelector('.quiz-module__HPadfW__content h2');
   }
 
+  function findContentEl() {
+    return document.querySelector('.quiz-module__HPadfW__content');
+  }
+
+  function findQuizTitleEl() {
+    return document.querySelector('.quiz-module__HPadfW__titleText');
+  }
+
   function findAgainButton() {
     const container = document.querySelector('.generic-quiz-module__m31QtG__controlButtonsAnki');
     if (!container) return null;
@@ -51,6 +87,11 @@
   // ---------- Timer bar ----------
 
   function makeTimerBar(container) {
+    // Remove any stale bar from a previous quiz's DOM first
+    if (timerBarWrap && timerBarWrap.parentNode) {
+      timerBarWrap.parentNode.removeChild(timerBarWrap);
+    }
+
     const wrap = document.createElement('div');
     wrap.style.cssText = `
       position: relative;
@@ -68,12 +109,16 @@
     `;
     wrap.appendChild(bar);
     container.parentNode.insertBefore(wrap, container);
+    timerBarWrap = wrap;
     return bar;
   }
 
   function clearTimer() {
     clearInterval(timerInterval);
     clearTimeout(timeoutHandle);
+    timerInterval = null;
+    timeoutHandle = null;
+    pausedRemaining = null;
   }
 
   function resetBarIdle() {
@@ -83,27 +128,19 @@
     }
   }
 
-  function startTimer(container) {
-    if (DEBUG) console.log('[helloquiz-timer] startTimer called, running =', running, 'seconds =', TIMER_SECONDS);
-    clearTimer();
-    timedOut = false;
+  function runCountdown(container, seconds) {
+    // (Re)start the visual + timeout for `seconds` from now.
+    clearInterval(timerInterval);
+    clearTimeout(timeoutHandle);
 
     if (!timerBar || !document.body.contains(timerBar)) {
       timerBar = makeTimerBar(container);
     }
 
-    if (!running) {
-      resetBarIdle();
-      return;
-    }
-
-    const start = Date.now();
-    timerBar.style.width = '100%';
-    timerBar.style.background = 'orange';
+    timerDeadline = Date.now() + seconds * 1000;
 
     timerInterval = setInterval(() => {
-      const elapsed = (Date.now() - start) / 1000;
-      const remaining = Math.max(0, TIMER_SECONDS - elapsed);
+      const remaining = Math.max(0, (timerDeadline - Date.now()) / 1000);
       const pct = TIMER_SECONDS > 0 ? (remaining / TIMER_SECONDS) * 100 : 0;
       timerBar.style.width = pct + '%';
       if (remaining < TIMER_SECONDS * 0.3) {
@@ -120,13 +157,82 @@
         timerBar.style.background = '#555';
         timerBar.style.width = '0%';
       }
-    }, TIMER_SECONDS * 1000);
+    }, seconds * 1000);
   }
 
-  // ---------- Review overlay (after wrong answer) ----------
+  function startTimer(container) {
+    if (DEBUG) console.log('[helloquiz-timer] startTimer called, running =', running, 'seconds =', TIMER_SECONDS);
+    clearTimer();
+    timedOut = false;
 
-  function findContentEl() {
-    return document.querySelector('.quiz-module__HPadfW__content');
+    if (!timerBar || !document.body.contains(timerBar)) {
+      timerBar = makeTimerBar(container);
+    }
+
+    if (!running) {
+      resetBarIdle();
+      return;
+    }
+
+    timerBar.style.width = '100%';
+    timerBar.style.background = 'orange';
+    runCountdown(container, TIMER_SECONDS);
+  }
+
+  // ---------- Pause/resume on tab switch or window blur ----------
+
+  function pauseTimer() {
+    // Only pause if a countdown is actually active
+    if (!timerInterval && !timeoutHandle) return;
+    const remaining = (timerDeadline - Date.now()) / 1000;
+    if (remaining > 0 && !timedOut) {
+      pausedRemaining = remaining;
+      clearInterval(timerInterval);
+      clearTimeout(timeoutHandle);
+      timerInterval = null;
+      timeoutHandle = null;
+      if (DEBUG) console.log('[helloquiz-timer] paused with', remaining.toFixed(1), 's remaining');
+    }
+  }
+
+  function resumeTimer() {
+    if (pausedRemaining === null || !running || overlayEl) return;
+    const container = findMapContainer();
+    if (container) {
+      if (DEBUG) console.log('[helloquiz-timer] resuming with', pausedRemaining.toFixed(1), 's remaining');
+      runCountdown(container, pausedRemaining);
+    }
+    pausedRemaining = null;
+  }
+
+  function onVisibilityChange() {
+    if (document.hidden) {
+      pauseTimer();
+    } else {
+      resumeTimer();
+    }
+  }
+
+  function onWindowBlur() {
+    // Fires when the window loses focus (e.g. alt-tab to another app),
+    // which visibilitychange alone does NOT catch if the browser window
+    // stays visible on screen.
+    pauseTimer();
+  }
+
+  function onWindowFocus() {
+    resumeTimer();
+  }
+
+  // ---------- Review pause (after wrong answer) ----------
+
+  function markPendingReview(reason) {
+    pendingReview = true;
+    // Pre-hide immediately so the next question text is never visible,
+    // even for a frame.
+    const contentEl = findContentEl();
+    if (contentEl) contentEl.style.visibility = 'hidden';
+    if (DEBUG) console.log('[helloquiz-timer] pending review (' + reason + '), will pause before next timer start');
   }
 
   function showReviewOverlay(container) {
@@ -185,17 +291,13 @@
 
   function onAnswerDetected(args) {
     // The site logs: console.log(0, 'correct') or console.log(0, 'incorrect')
-    // Only check string args — skip objects to avoid expensive JSON.stringify
+    // Only check string args — skip objects to avoid expensive serialization
     for (let i = 0; i < args.length; i++) {
       if (typeof args[i] !== 'string') continue;
       const s = args[i].toLowerCase();
       if (s === 'incorrect') {
-        if (DEBUG) console.debug('[helloquiz-timer] INCORRECT answer detected');
         clearTimer();
-        pendingReview = true;
-        // Pre-hide immediately so the next question text is never visible
-        const contentEl = findContentEl();
-        if (contentEl) contentEl.style.visibility = 'hidden';
+        markPendingReview('incorrect answer');
         return;
       }
       if (s === 'correct') {
@@ -222,6 +324,35 @@
 
   // ---------- Watchers ----------
 
+  function fullReset(reason) {
+    if (DEBUG) console.log('[helloquiz-timer] full reset (' + reason + ')');
+    clearTimer();
+    hideReviewOverlay();
+    pendingReview = false;
+    timedOut = false;
+    buttonsWerePresent = false;
+    // Drop stale bar references so a fresh one gets created in the new DOM
+    if (timerBarWrap && timerBarWrap.parentNode) {
+      timerBarWrap.parentNode.removeChild(timerBarWrap);
+    }
+    timerBar = null;
+    timerBarWrap = null;
+    // Force question re-detection
+    currentQuestionText = '__forced_reset__' + Math.random();
+  }
+
+  function watchForQuizChange() {
+    const titleEl = findQuizTitleEl();
+    const title = titleEl ? titleEl.textContent : '';
+    if (title !== currentQuizTitle) {
+      const isFirst = currentQuizTitle === '';
+      currentQuizTitle = title;
+      if (!isFirst) {
+        fullReset('quiz changed to "' + title + '"');
+      }
+    }
+  }
+
   function watchForNewQuestion() {
     const qEl = findQuestionEl();
     const container = findMapContainer();
@@ -229,6 +360,9 @@
 
     if (qEl.textContent !== currentQuestionText) {
       currentQuestionText = qEl.textContent;
+      // Don't assume no buttons are present - the previous question's
+      // grading buttons can still be mid-fade-out in the DOM right as the
+      // next question renders.
       buttonsWerePresent = !!findAgainButton();
 
       if (running && pendingReview) {
@@ -248,9 +382,7 @@
       // Buttons just appeared — the user answered correctly on the map.
       clearTimer();
       if (running && timedOut) {
-        pendingReview = true;
-        const contentEl = findContentEl();
-        if (contentEl) contentEl.style.visibility = 'hidden';
+        markPendingReview('timeout');
         again.click();
       }
     }
@@ -279,14 +411,10 @@
       depth++;
     }
 
-    if (DEBUG && matched) {
-      console.log('[helloquiz-timer] nav button matched:', matched.textContent.trim());
-    }
-
     if (!matched) return;
+    if (DEBUG) console.log('[helloquiz-timer] nav button matched:', matched.textContent.trim());
 
     setTimeout(() => {
-      if (DEBUG) console.log('[helloquiz-timer] forcing resync after nav click');
       hideReviewOverlay();
       pendingReview = false;
       currentQuestionText = '__forced_reset__' + Math.random();
@@ -299,10 +427,7 @@
   function onPossibleAgainClick(e) {
     const btn = e.target.closest && e.target.closest('button[title="1"]');
     if (btn) {
-      pendingReview = true;
-      const contentEl = findContentEl();
-      if (contentEl) contentEl.style.visibility = 'hidden';
-      if (DEBUG) console.log('[helloquiz-timer] "again" grading detected, will pause before next timer start');
+      markPendingReview('again clicked');
     }
   }
 
@@ -320,17 +445,14 @@
     // Catch keyboard shortcut for "again" (key "1") from the user's other
     // userscript. Only fire when grading buttons are actually visible, the
     // overlay isn't showing, and focus isn't in an input field (otherwise
-    // typing "15" into the timer seconds field would falsely trigger this).
+    // typing into the timer seconds field would falsely trigger this).
     if (e.key !== '1') return;
     if (overlayEl) return;
     const tag = (document.activeElement || {}).tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     if (!findAgainButton()) return;
 
-    pendingReview = true;
-    const contentEl = findContentEl();
-    if (contentEl) contentEl.style.visibility = 'hidden';
-    if (DEBUG) console.log('[helloquiz-timer] "again" grading detected via keyboard, will pause before next timer start');
+    markPendingReview('again key');
   }
 
   // ---------- Control panel ----------
@@ -376,6 +498,7 @@
       const val = parseFloat(input.value);
       if (!isNaN(val) && val > 0) {
         TIMER_SECONDS = val;
+        saveSettings();
         const container = findMapContainer();
         if (container) startTimer(container);
       } else {
@@ -396,6 +519,7 @@
     `;
     toggleBtn.addEventListener('click', () => {
       running = !running;
+      saveSettings();
       toggleBtn.textContent = running ? 'stop' : 'start';
       toggleBtn.style.background = running ? '#c0392b' : '#27ae60';
 
@@ -424,7 +548,11 @@
     document.addEventListener('click', onPossibleAgainClick, true);
     document.addEventListener('keydown', onOverlayKeydown, true);
     document.addEventListener('keydown', onAgainKeydown, true);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('blur', onWindowBlur);
+    window.addEventListener('focus', onWindowFocus);
     setInterval(() => {
+      watchForQuizChange();
       watchForNewQuestion();
       watchForGradingButtons();
     }, 200);
