@@ -475,11 +475,19 @@
     if (!matched) return;
     if (DEBUG) console.log('[helloquiz-timer] nav button matched:', matched.textContent.trim());
 
+    // "▶ practice more" continues in the same quiz you're already engaged
+    // with — no waiting screen needed, start the timer directly. The other
+    // nav buttons (⇋ select / → next quiz) lead elsewhere and keep the
+    // waiting screen.
+    const isPracticeMore = matched.textContent.includes('▶');
+
     setTimeout(() => {
       hideReviewOverlay();
-      // Navigation (next question preview / next quiz / practice more)
-      // also starts paused: wait for a click before revealing the question.
-      markPendingReview('nav');
+      if (isPracticeMore) {
+        pendingReview = false;
+      } else {
+        markPendingReview('nav');
+      }
       currentQuestionText = '__forced_reset__' + Math.random();
       watchForNewQuestion();
     }, 250);
