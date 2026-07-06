@@ -518,6 +518,61 @@
     markPendingReview('again key');
   }
 
+  function onQuizListKeydown(e) {
+    // On the quiz list (/learn), pressing "1" opens the first quiz in the
+    // table (its anki-mode link).
+    if (e.key !== '1') return;
+    if (overlayEl) return; // overlay handler takes priority
+    const tag = (document.activeElement || {}).tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (findAgainButton()) return; // grading in progress takes priority
+    if (findNavButtonBySymbol('▶')) return; // end-of-quiz buttons take priority
+
+    const firstLink = document.querySelector(
+      '.learn-module__VSVJQa__table tbody tr td a[href*="?learn"]'
+    );
+    if (!firstLink) return;
+
+    e.preventDefault();
+    if (DEBUG) console.log('[helloquiz-timer] opening first quiz in list:', firstLink.textContent);
+    firstLink.click();
+  }
+
+  // ---------- Nav-button keyboard shortcuts (end-of-quiz screen) ----------
+
+  const NAV_KEY_SYMBOL_MAP = {
+    '1': '▶', // practice more
+    '2': '⇋', // select quiz
+    '3': '→', // next quiz
+  };
+
+  function findNavButtonBySymbol(symbol) {
+    const spans = document.querySelectorAll('span[class*="generic-quiz-module"][class*="expanded"]');
+    for (const span of spans) {
+      const button = span.closest('button');
+      if (button && button.textContent.includes(symbol)) return button;
+    }
+    return null;
+  }
+
+  function onNavKeydown(e) {
+    const tag = (document.activeElement || {}).tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (e.target && e.target.isContentEditable) return;
+
+    const symbol = NAV_KEY_SYMBOL_MAP[e.key];
+    if (!symbol) return;
+    if (overlayEl) return; // overlay's own "1" handling takes priority
+    if (e.key === '1' && findAgainButton()) return; // grading takes priority
+
+    const button = findNavButtonBySymbol(symbol);
+    if (!button) return;
+
+    e.preventDefault();
+    if (DEBUG) console.log('[helloquiz-timer] nav key', e.key, '->', symbol);
+    button.click();
+  }
+
   // ---------- Control panel ----------
 
   function makeControlPanel() {
@@ -612,6 +667,8 @@
     document.addEventListener('click', onPossibleAgainClick, true);
     document.addEventListener('keydown', onOverlayKeydown, true);
     document.addEventListener('keydown', onAgainKeydown, true);
+    document.addEventListener('keydown', onNavKeydown, true);
+    document.addEventListener('keydown', onQuizListKeydown, true);
     document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('focus', onWindowFocus);
