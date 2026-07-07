@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HelloQuiz Anki Timer
 // @namespace    http://tampermonkey.net/
-// @version      1.0.1
+// @version      1.0.2
 // @description  Adjustable countdown per question. If you find the correct province after time's up, auto-clicks "again" instead of letting you grade it normally.
 // @author       Jakube
 // @match        https://helloquiz.app/quiz/*?learn
@@ -53,6 +53,7 @@
   let pendingReview = true; // start paused: first question waits for a click
   let overlayEl = null;
   let panelEl = null;
+  let numButtonsEl = null;
 
   // Timer bookkeeping for pause/resume on tab switch
   let timerDeadline = 0;      // Date.now() when timer would expire
@@ -606,24 +607,66 @@
     markPendingReview('again key');
   }
 
+  const QUIZ_LIST_KEY_INDEX = { '1': 0, '2': 1, '3': 2, '4': 3 };
+
+  function openQuizListRow(index) {
+    // Select by row (each row contains multiple ?learn links: the title
+    // and the "anki mode" link both point to the same quiz).
+    const rows = document.querySelectorAll('.learn-module__VSVJQa__table tbody tr');
+    const row = rows[index];
+    if (!row) return false;
+    const link = row.querySelector('a[href*="?learn"]');
+    if (!link) return false;
+    if (DEBUG) console.log('[helloquiz-timer] opening quiz #' + (index + 1) + ' in list:', link.textContent);
+    link.click();
+    return true;
+  }
+
   function onQuizListKeydown(e) {
-    // On the quiz list (/learn), pressing "1" opens the first quiz in the
-    // table (its anki-mode link).
-    if (e.key !== '1') return;
+    // On the quiz list (/learn), keys 1-4 open the corresponding quiz row.
+    const index = QUIZ_LIST_KEY_INDEX[e.key];
+    if (index === undefined) return;
     if (overlayEl) return; // overlay handler takes priority
     const tag = (document.activeElement || {}).tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     if (findAgainButton()) return; // grading in progress takes priority
-    if (findNavButtonBySymbol('▶')) return; // end-of-quiz buttons take priority
+    if (findNavButtonBySymbol(NAV_KEY_SYMBOL_MAP[e.key])) return; // end-of-quiz buttons take priority
 
-    const firstLink = document.querySelector(
-      '.learn-module__VSVJQa__table tbody tr td a[href*="?learn"]'
-    );
-    if (!firstLink) return;
+    if (openQuizListRow(index)) {
+      e.preventDefault();
+    }
+  }
 
-    e.preventDefault();
-    if (DEBUG) console.log('[helloquiz-timer] opening first quiz in list:', firstLink.textContent);
-    firstLink.click();
+  // Unified action for the panel's 1-4 buttons: mirrors the keyboard
+  // priority chain (overlay > end-of-quiz nav > grading > quiz list).
+  function findQuizListTable() {
+    return document.querySelector('.learn-module__VSVJQa__table');
+  }
+
+  function updateNumButtonsVisibility() {
+    if (!numButtonsEl) return;
+    numButtonsEl.style.display = findQuizListTable() ? 'flex' : 'none';
+  }
+
+  function performNumberAction(key) {
+    if (overlayEl) {
+      if (key === '1') proceedFromOverlay();
+      return;
+    }
+    const navBtn = findNavButtonBySymbol(NAV_KEY_SYMBOL_MAP[key]);
+    if (navBtn) {
+      navBtn.click();
+      return;
+    }
+    const gradeContainer = document.querySelector('.generic-quiz-module__m31QtG__controlButtonsAnki');
+    const gradeBtn = gradeContainer && gradeContainer.querySelector('button[title="' + key + '"]');
+    if (gradeBtn) {
+      // .click() dispatches a real event, so onPossibleAgainClick catches
+      // the "1" case and marks the review pause automatically.
+      gradeBtn.click();
+      return;
+    }
+    openQuizListRow(QUIZ_LIST_KEY_INDEX[key]);
   }
 
   // ---------- Nav-button keyboard shortcuts (end-of-quiz screen) ----------
@@ -635,6 +678,7 @@
   };
 
   function findNavButtonBySymbol(symbol) {
+    if (!symbol) return null;
     const spans = document.querySelectorAll('span[class*="generic-quiz-module"][class*="expanded"]');
     for (const span of spans) {
       const button = span.closest('button');
@@ -739,7 +783,30 @@
       }
     });
 
+    const numButtons = document.createElement('div');
+    numButtons.style.cssText = 'display:flex; gap:4px;';
+    ['1', '2', '3', '4'].forEach((key) => {
+      const numBtn = document.createElement('button');
+      numBtn.textContent = key;
+      numBtn.title = 'open quiz #' + key + ' in the list (same as pressing key ' + key + ')';
+      numBtn.style.cssText = `
+        width: 26px;
+        padding: 3px 0;
+        border-radius: 4px;
+        border: 1px solid #666;
+        cursor: pointer;
+        font-weight: 600;
+        background: #444;
+        color: #fff;
+      `;
+      numBtn.addEventListener('click', () => performNumberAction(key));
+      numButtons.appendChild(numBtn);
+    });
+    numButtonsEl = numButtons;
+    updateNumButtonsVisibility();
+
     label.appendChild(input);
+    panel.appendChild(numButtons);
     panel.appendChild(label);
     panel.appendChild(toggleBtn);
     document.body.appendChild(panel);
@@ -776,6 +843,7 @@
       if (!panelEl || !document.body.contains(panelEl)) {
         makeControlPanel();
       }
+      updateNumButtonsVisibility();
       watchForQuizChange();
       watchForNewQuestion();
       watchForGradingButtons();
