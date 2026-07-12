@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HelloQuiz Anki Timer
 // @namespace    http://tampermonkey.net/
-// @version      1.0.2
+// @version      1.0.3
 // @description  Adjustable countdown per question. If you find the correct province after time's up, auto-clicks "again" instead of letting you grade it normally.
 // @author       Jakube
 // @match        https://helloquiz.app/quiz/*?learn
@@ -251,9 +251,24 @@
     document.documentElement.classList.remove(HIDE_CLASS);
   }
 
+  // ---------- Anki-page detection ----------
+
+  // @match only controls where the script LOADS. With SPA navigation the
+  // script keeps running when moving to non-anki pages (e.g. a normal
+  // quiz at /quiz/<id> without ?learn), so every feature must also check
+  // at runtime whether we're on an anki page.
+
+  function isAnkiPage() {
+    if (location.pathname === '/learn') return true;
+    if (location.pathname.startsWith('/quiz/') && new URLSearchParams(location.search).has('learn')) return true;
+    return false;
+  }
+
   // Apply immediately at document-start, before first render
   installHideStyle();
-  hideQuestion();
+  if (isAnkiPage()) {
+    hideQuestion();
+  }
 
   // ---------- Review pause (after wrong answer) ----------
 
@@ -397,6 +412,8 @@
   // ---------- Console hook (detect correct/incorrect) ----------
 
   function onAnswerDetected(args) {
+    if (!scriptActive) return;
+    if (!isAnkiPage()) return;
     // The site logs: console.log(0, 'correct') or console.log(0, 'incorrect')
     // Only check string args — skip objects to avoid expensive serialization
     for (let i = 0; i < args.length; i++) {
@@ -471,11 +488,42 @@
   // renders, so hooking it lets us hide/reset with zero visible flash.
 
   let lastUrl = location.href;
+  let scriptActive = true;
+
+  function setActive(active) {
+    if (active === scriptActive) return;
+    scriptActive = active;
+    if (DEBUG) console.log('[helloquiz-timer] ' + (active ? 'activating' : 'deactivating') + ' on', location.pathname + location.search);
+
+    if (active) {
+      // Returning to an anki page: show panel, start in the waiting state.
+      if (panelEl) panelEl.style.display = 'flex';
+      markPendingReview('entered anki page');
+      currentQuestionText = '__forced_reset__' + Math.random();
+    } else {
+      // Leaving anki mode: undo everything so normal pages are untouched.
+      clearTimer();
+      hideReviewOverlay(); // also reveals the question
+      pendingReview = false;
+      timedOut = false;
+      showQuestion();
+      if (timerBarWrap && timerBarWrap.parentNode) {
+        timerBarWrap.parentNode.removeChild(timerBarWrap);
+      }
+      timerBar = null;
+      timerBarWrap = null;
+      if (panelEl) panelEl.style.display = 'none';
+    }
+  }
 
   function onUrlChange() {
     if (location.href === lastUrl) return;
     lastUrl = location.href;
-    fullReset('url changed to ' + location.pathname);
+    const anki = isAnkiPage();
+    setActive(anki);
+    if (anki) {
+      fullReset('url changed to ' + location.pathname);
+    }
   }
 
   function installHistoryHook() {
@@ -541,6 +589,8 @@
   }
 
   function onPossibleNavClick(e) {
+    if (!scriptActive) return;
+    if (!isAnkiPage()) return;
     let el = e.target;
     let depth = 0;
     let matched = null;
@@ -574,14 +624,6 @@
     }, 250);
   }
 
-  // ---------- Again-button detection ----------
-
-  function onPossibleAgainClick(e) {
-    const btn = e.target.closest && e.target.closest('button[title="1"]');
-    if (btn) {
-      markPendingReview('again clicked');
-    }
-  }
 
   // ---------- Keyboard handlers ----------
 
@@ -593,19 +635,6 @@
     }
   }
 
-  function onAgainKeydown(e) {
-    // Catch keyboard shortcut for "again" (key "1") from the user's other
-    // userscript. Only fire when grading buttons are actually visible, the
-    // overlay isn't showing, and focus isn't in an input field (otherwise
-    // typing into the timer seconds field would falsely trigger this).
-    if (e.key !== '1') return;
-    if (overlayEl) return;
-    const tag = (document.activeElement || {}).tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-    if (!findAgainButton()) return;
-
-    markPendingReview('again key');
-  }
 
   const QUIZ_LIST_KEY_INDEX = { '1': 0, '2': 1, '3': 2, '4': 3 };
 
@@ -623,6 +652,8 @@
   }
 
   function onQuizListKeydown(e) {
+    if (!scriptActive) return;
+    if (!isAnkiPage()) return;
     // On the quiz list (/learn), keys 1-4 open the corresponding quiz row.
     const index = QUIZ_LIST_KEY_INDEX[e.key];
     if (index === undefined) return;
@@ -661,8 +692,6 @@
     const gradeContainer = document.querySelector('.generic-quiz-module__m31QtG__controlButtonsAnki');
     const gradeBtn = gradeContainer && gradeContainer.querySelector('button[title="' + key + '"]');
     if (gradeBtn) {
-      // .click() dispatches a real event, so onPossibleAgainClick catches
-      // the "1" case and marks the review pause automatically.
       gradeBtn.click();
       return;
     }
@@ -688,6 +717,8 @@
   }
 
   function onNavKeydown(e) {
+    if (!scriptActive) return;
+    if (!isAnkiPage()) return;
     const tag = (document.activeElement || {}).tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     if (e.target && e.target.isContentEditable) return;
@@ -826,18 +857,21 @@
     installConsoleHook();
     installHistoryHook();
     document.addEventListener('click', onPossibleNavClick, true);
-    document.addEventListener('click', onPossibleAgainClick, true);
     document.addEventListener('click', onReviewMapClickBlock, true);
     document.addEventListener('pointerdown', onReviewPointerDown, true);
     document.addEventListener('pointerup', onReviewPointerUp, true);
     document.addEventListener('keydown', onOverlayKeydown, true);
-    document.addEventListener('keydown', onAgainKeydown, true);
     document.addEventListener('keydown', onNavKeydown, true);
     document.addEventListener('keydown', onQuizListKeydown, true);
     document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('focus', onWindowFocus);
     setInterval(() => {
+      // Runtime page check: SPA navigation can move us to non-anki pages
+      // where all features must stay off.
+      setActive(isAnkiPage());
+      if (!scriptActive) return;
+
       // Watchdog: Next.js hydration or navigation can remove nodes we
       // appended to <body>. Recreate the panel if it's gone.
       if (!panelEl || !document.body.contains(panelEl)) {
