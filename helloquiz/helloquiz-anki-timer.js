@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HelloQuiz Anki Timer
 // @namespace    http://tampermonkey.net/
-// @version      1.0.3
+// @version      1.0.4
 // @description  Adjustable countdown per question. If you find the correct province after time's up, auto-clicks "again" instead of letting you grade it normally.
 // @author       Jakube
 // @match        https://helloquiz.app/quiz/*?learn
@@ -70,7 +70,7 @@
   }
 
   function findQuestionEl() {
-    return document.querySelector('.quiz-module__HPadfW__content h2');
+    return document.querySelector('.quiz-module__HPadfW__content h2:not(.' + MIRROR_CLASS + ')');
   }
 
   function findQuizTitleEl() {
@@ -118,6 +118,7 @@
     timerInterval = null;
     timeoutHandle = null;
     pausedRemaining = null;
+    setMirrorActive(false);
   }
 
   function resetBarIdle() {
@@ -137,6 +138,7 @@
     }
 
     timerDeadline = Date.now() + seconds * 1000;
+    setMirrorActive(true);
 
     timerInterval = setInterval(() => {
       const remaining = Math.max(0, (timerDeadline - Date.now()) / 1000);
@@ -152,6 +154,7 @@
 
     timeoutHandle = setTimeout(() => {
       timedOut = true;
+      setMirrorActive(false);
       if (timerBar) {
         timerBar.style.background = '#555';
         timerBar.style.width = '0%';
@@ -190,6 +193,7 @@
       clearTimeout(timeoutHandle);
       timerInterval = null;
       timeoutHandle = null;
+      setMirrorActive(false);
       if (DEBUG) console.log('[helloquiz-timer] paused with', remaining.toFixed(1), 's remaining');
     }
   }
@@ -232,15 +236,84 @@
   // document-start.
 
   const HIDE_CLASS = 'hq-timer-hide-question';
+  const MIRROR_CLASS = 'hq-timer-mirror';
+  const MIRROR_ACTIVE_CLASS = 'hq-timer-mirror-active';
+  let mirrorActive = false;
+
+  function setMirrorActive(active) {
+    mirrorActive = active;
+    const mirror = document.querySelector('h2.' + MIRROR_CLASS);
+    if (mirror) mirror.classList.toggle(MIRROR_ACTIVE_CLASS, active);
+  }
+
+  // The real question <h2> stays hidden at ALL times on anki pages (via
+  // the CSS rule below). We render our own mirror <h2> in the same
+  // position and fully control its text. This way, after a wrong answer
+  // the mirror can keep showing the OLD question (the one that was
+  // answered) while the site's real label already contains the next one.
+  let mirrorText = 'Click to start';
+
+  function findContentElForMirror() {
+    return document.querySelector('.quiz-module__HPadfW__content');
+  }
+
+  function ensureMirror() {
+    const contentEl = findContentElForMirror();
+    if (!contentEl) return;
+    let mirror = contentEl.querySelector('h2.' + MIRROR_CLASS);
+    if (!mirror) {
+      mirror = document.createElement('h2');
+      mirror.className = MIRROR_CLASS;
+      const realH2 = contentEl.querySelector('h2:not(.' + MIRROR_CLASS + ')');
+      if (realH2) contentEl.insertBefore(mirror, realH2);
+      else contentEl.insertBefore(mirror, contentEl.firstChild);
+    }
+    if (mirror.textContent !== mirrorText) mirror.textContent = mirrorText;
+    mirror.classList.toggle(MIRROR_ACTIVE_CLASS, mirrorActive);
+  }
+
+  function removeMirror() {
+    document.querySelectorAll('h2.' + MIRROR_CLASS).forEach((el) => el.remove());
+  }
+
+  function setMirrorToCurrentQuestion() {
+    const qEl = findQuestionEl();
+    if (qEl) mirrorText = qEl.textContent;
+    ensureMirror();
+  }
+
+  let hideStyleEl = null;
 
   function installHideStyle() {
     const style = document.createElement('style');
     style.textContent = `
-      html.${HIDE_CLASS} .quiz-module__HPadfW__content {
-        visibility: hidden !important;
+      html.${HIDE_CLASS} .quiz-module__HPadfW__content h2:not(.${MIRROR_CLASS}) {
+        display: none !important;
+      }
+      h2.${MIRROR_CLASS}.${MIRROR_ACTIVE_CLASS} {
+        background: rgba(255, 165, 0, 0.22);
+        outline: 2px solid rgba(255, 165, 0, 0.55);
+        border-radius: 6px;
+        padding: 2px 10px;
       }
     `;
-    document.documentElement.appendChild(style);
+    // Prefer <head> when it exists (more stable across hydration);
+    // fall back to <html> at document-start when head isn't there yet.
+    (document.head || document.documentElement).appendChild(style);
+    hideStyleEl = style;
+  }
+
+  function ensureHideStyle() {
+    // React hydration can discard nodes it doesn't know about, removing
+    // our stylesheet - which un-hides the real question label so both
+    // labels show. Reinstall whenever it's gone.
+    if (!hideStyleEl || !hideStyleEl.isConnected) {
+      if (hideStyleEl && hideStyleEl.parentNode) {
+        hideStyleEl.parentNode.removeChild(hideStyleEl);
+      }
+      installHideStyle();
+      if (DEBUG) console.log('[helloquiz-timer] reinstalled hide stylesheet');
+    }
   }
 
   function hideQuestion() {
@@ -274,18 +347,15 @@
 
   function markPendingReview(reason) {
     pendingReview = true;
-    // Hide immediately so the next question text is never visible,
-    // even for a frame.
-    hideQuestion();
+    // The real question label is permanently hidden on anki pages; the
+    // mirror label simply won't be updated while a review is pending, so
+    // it keeps showing the question that was answered.
     if (DEBUG) console.log('[helloquiz-timer] pending review (' + reason + '), will pause before next timer start');
   }
 
   function showReviewOverlay(container) {
     hideReviewOverlay();
     if (!container) return;
-
-    // Hide the question text so the next answer isn't revealed
-    hideQuestion();
 
     // Compact button placed inside the control panel (left of the timer
     // config), so it doesn't cover the quiz title or the map.
@@ -325,14 +395,12 @@
       overlayEl.parentNode.removeChild(overlayEl);
     }
     overlayEl = null;
-
-    // Restore question text visibility
-    showQuestion();
   }
 
   function proceedFromOverlay() {
     hideReviewOverlay();
     pendingReview = false;
+    setMirrorToCurrentQuestion();
     const container = findMapContainer();
     if (container) startTimer(container);
   }
@@ -460,6 +528,8 @@
     }
     timerBar = null;
     timerBarWrap = null;
+    mirrorText = 'Click to start'; // previous quiz's question is irrelevant now
+    ensureMirror();
     // New quiz starts paused too: wait for a click before showing the
     // question and starting the timer.
     markPendingReview('quiz start');
@@ -498,6 +568,8 @@
     if (active) {
       // Returning to an anki page: show panel, start in the waiting state.
       if (panelEl) panelEl.style.display = 'flex';
+      hideQuestion();
+      mirrorText = 'Click to start';
       markPendingReview('entered anki page');
       currentQuestionText = '__forced_reset__' + Math.random();
     } else {
@@ -507,6 +579,7 @@
       pendingReview = false;
       timedOut = false;
       showQuestion();
+      removeMirror();
       if (timerBarWrap && timerBarWrap.parentNode) {
         timerBarWrap.parentNode.removeChild(timerBarWrap);
       }
@@ -551,14 +624,14 @@
       buttonsWerePresent = !!findAgainButton();
 
       if (running && pendingReview) {
+        // Review pending: show the continue button and do NOT update the
+        // mirror - it keeps showing the previous (answered) question.
         const quizContainer = findQuizContainer() || container;
         showReviewOverlay(quizContainer);
       } else {
-        // Timer disabled or no review pending: make sure the question is
-        // visible (otherwise a pendingReview set while stopped would keep
-        // it hidden with no overlay to dismiss).
         pendingReview = false;
-        showQuestion();
+        mirrorText = qEl.textContent;
+        ensureMirror();
         startTimer(container);
       }
     }
@@ -878,6 +951,9 @@
         makeControlPanel();
       }
       updateNumButtonsVisibility();
+      ensureHideStyle();
+      hideQuestion(); // re-assert the <html> class in case it was stripped
+      ensureMirror();
       watchForQuizChange();
       watchForNewQuestion();
       watchForGradingButtons();
