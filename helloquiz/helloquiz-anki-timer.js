@@ -244,6 +244,7 @@
     mirrorActive = active;
     const mirror = document.querySelector('h2.' + MIRROR_CLASS);
     if (mirror) mirror.classList.toggle(MIRROR_ACTIVE_CLASS, active);
+    else ensureMirror();
   }
 
   // The real question <h2> stays hidden at ALL times on anki pages (via
@@ -276,6 +277,33 @@
     document.querySelectorAll('h2.' + MIRROR_CLASS).forEach((el) => el.remove());
   }
 
+  // React re-renders can destroy or replace our mirror element; the 200ms
+  // poll is too slow to restore it without a visible flash. A
+  // MutationObserver callback runs as a microtask BEFORE the browser
+  // paints, so restoring the mirror here means text and highlight always
+  // appear together, never a partially-styled frame.
+  let mirrorObserver = null;
+  let observerBusy = false;
+
+  function installMirrorObserver() {
+    if (mirrorObserver) return;
+    mirrorObserver = new MutationObserver(() => {
+      if (!scriptActive || observerBusy) return;
+      observerBusy = true; // our own DOM writes below also trigger mutations
+      try {
+        ensureMirror();
+        // Also detect quiz/question changes right here (pre-paint) instead
+        // of waiting for the 200ms poll: when a grading button swaps in
+        // the next question, the mirror updates in the same frame.
+        watchForQuizChange();
+        watchForNewQuestion();
+      } finally {
+        observerBusy = false;
+      }
+    });
+    mirrorObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+  }
+
   function setMirrorToCurrentQuestion() {
     const qEl = findQuestionEl();
     if (qEl) mirrorText = qEl.textContent;
@@ -290,11 +318,15 @@
       html.${HIDE_CLASS} .quiz-module__HPadfW__content h2:not(.${MIRROR_CLASS}) {
         display: none !important;
       }
+      h2.${MIRROR_CLASS} {
+        padding: 2px 10px;
+        border-radius: 6px;
+        outline: 2px solid transparent;
+        transition: none !important;
+      }
       h2.${MIRROR_CLASS}.${MIRROR_ACTIVE_CLASS} {
         background: rgba(255, 165, 0, 0.22);
-        outline: 2px solid rgba(255, 165, 0, 0.55);
-        border-radius: 6px;
-        padding: 2px 10px;
+        outline-color: rgba(255, 165, 0, 0.55);
       }
     `;
     // Prefer <head> when it exists (more stable across hydration);
@@ -928,6 +960,7 @@
   function init() {
     makeControlPanel();
     installConsoleHook();
+    installMirrorObserver();
     installHistoryHook();
     document.addEventListener('click', onPossibleNavClick, true);
     document.addEventListener('click', onReviewMapClickBlock, true);
