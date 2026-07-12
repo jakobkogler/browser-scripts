@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HelloQuiz Anki Timer
 // @namespace    http://tampermonkey.net/
-// @version      1.0.4
+// @version      1.0.6
 // @description  Adjustable countdown per question. If you find the correct province after time's up, auto-clicks "again" instead of letting you grade it normally.
 // @author       Jakube
 // @match        https://helloquiz.app/quiz/*?learn
@@ -53,7 +53,6 @@
   let pendingReview = true; // start paused: first question waits for a click
   let overlayEl = null;
   let panelEl = null;
-  let numButtonsEl = null;
 
   // Timer bookkeeping for pause/resume on tab switch
   let timerDeadline = 0;      // Date.now() when timer would expire
@@ -237,6 +236,7 @@
 
   const HIDE_CLASS = 'hq-timer-hide-question';
   const MIRROR_CLASS = 'hq-timer-mirror';
+  const KBD_CLASS = 'hq-timer-kbd'; // must be declared before installHideStyle() runs at document-start
   const MIRROR_ACTIVE_CLASS = 'hq-timer-mirror-active';
   let mirrorActive = false;
 
@@ -292,6 +292,8 @@
       observerBusy = true; // our own DOM writes below also trigger mutations
       try {
         ensureMirror();
+        ensureListKbdHints();
+        ensureNavKbdHints();
         // Also detect quiz/question changes right here (pre-paint) instead
         // of waiting for the 200ms poll: when a grading button swaps in
         // the next question, the mirror updates in the same frame.
@@ -323,6 +325,29 @@
         border-radius: 6px;
         outline: 2px solid transparent;
         transition: none !important;
+      }
+      kbd.${KBD_CLASS} {
+        display: inline-block;
+        min-width: 1.2em;
+        margin-right: 6px;
+        padding: 1px 5px;
+        border: 1px solid currentColor;
+        border-radius: 4px;
+        font-family: ui-monospace, monospace;
+        font-size: 0.85em;
+        line-height: 1.3;
+        text-align: center;
+        opacity: 0.75;
+      }
+      /* Menu variant: keep "anki mode" on one line with a compact badge */
+      menu a[href="/learn"] {
+        white-space: nowrap;
+      }
+      menu a[href="/learn"] kbd.${KBD_CLASS} {
+        min-width: 0;
+        margin-right: 4px;
+        padding: 0 3px;
+        font-size: 0.7em;
       }
       h2.${MIRROR_CLASS}.${MIRROR_ACTIVE_CLASS} {
         background: rgba(255, 165, 0, 0.22);
@@ -389,37 +414,14 @@
     hideReviewOverlay();
     if (!container) return;
 
-    // Compact button placed inside the control panel (left of the timer
-    // config), so it doesn't cover the quiz title or the map.
-    const btn = document.createElement('button');
-    btn.textContent = 'next question (click map / 1)';
-    btn.style.cssText = `
-      padding: 3px 10px;
-      font-size: 13px;
-      font-weight: 600;
-      font-family: system-ui, sans-serif;
-      border: none;
-      border-radius: 4px;
-      background: #2980b9;
-      color: #fff;
-      cursor: pointer;
-      white-space: nowrap;
-    `;
-    btn.addEventListener('click', proceedFromOverlay);
+    // No visible button: continuing happens by clicking the map or
+    // pressing 1 (the mirror label says "Click to start" at quiz start,
+    // and after mistakes the frozen old question signals the pause).
+    // A detached marker element preserves the overlayEl truthiness
+    // contract that all the handlers rely on.
+    overlayEl = document.createElement('span');
 
-    if (panelEl && document.body.contains(panelEl)) {
-      panelEl.insertBefore(btn, panelEl.firstChild);
-    } else {
-      // Fallback if the panel isn't there for some reason
-      btn.style.position = 'fixed';
-      btn.style.top = '10px';
-      btn.style.right = '10px';
-      btn.style.zIndex = '100000';
-      document.body.appendChild(btn);
-    }
-    overlayEl = btn;
-
-    if (DEBUG) console.log('[helloquiz-timer] showing review button, timer paused');
+    if (DEBUG) console.log('[helloquiz-timer] review pause active, timer paused');
   }
 
   function hideReviewOverlay() {
@@ -612,6 +614,7 @@
       timedOut = false;
       showQuestion();
       removeMirror();
+      removeListKbdHints();
       if (timerBarWrap && timerBarWrap.parentNode) {
         timerBarWrap.parentNode.removeChild(timerBarWrap);
       }
@@ -742,6 +745,83 @@
 
 
   const QUIZ_LIST_KEY_INDEX = { '1': 0, '2': 1, '3': 2, '4': 3 };
+  const KBD_COUNT = 4; // rows reachable via keys 1-4
+
+  function ensureListKbdHints() {
+    const table = findQuizListTable();
+    if (!table) return;
+    const rows = table.querySelectorAll('tbody tr');
+    rows.forEach((row, i) => {
+      const existing = row.querySelector('kbd.' + KBD_CLASS);
+      if (i < KBD_COUNT) {
+        const label = String(i + 1);
+        if (existing) {
+          // Rows can reorder (sortable table) - keep numbers positional
+          if (existing.textContent !== label) existing.textContent = label;
+        } else {
+          const td = row.querySelector('td');
+          if (!td) return;
+          const kbd = document.createElement('kbd');
+          kbd.className = KBD_CLASS;
+          kbd.textContent = label;
+          td.insertBefore(kbd, td.firstChild);
+        }
+      } else if (existing) {
+        existing.remove();
+      }
+    });
+  }
+
+  function removeListKbdHints() {
+    document.querySelectorAll('kbd.' + KBD_CLASS).forEach((el) => el.remove());
+  }
+
+  function ensureNavKbdHints() {
+    // Same key badges on the end-of-quiz buttons (▶ practice more,
+    // ⇋ select quiz, → next quiz), matching their 1/2/3 shortcuts.
+    // When the buttons aren't on the page, this is a cheap no-op; their
+    // badges disappear together with the buttons themselves.
+    Object.keys(NAV_KEY_SYMBOL_MAP).forEach((key) => {
+      const btn = findNavButtonBySymbol(NAV_KEY_SYMBOL_MAP[key]);
+      if (!btn) return;
+      if (btn.querySelector('kbd.' + KBD_CLASS)) return;
+      const kbd = document.createElement('kbd');
+      kbd.className = KBD_CLASS;
+      kbd.textContent = key;
+      btn.insertBefore(kbd, btn.firstChild);
+    });
+
+    // And on the grading buttons (again/hard/good/easy), whose keyboard
+    // shortcuts match their title attributes 1-4.
+    const gradeContainer = document.querySelector('.generic-quiz-module__m31QtG__controlButtonsAnki');
+    if (gradeContainer) {
+      ['1', '2', '3', '4'].forEach((key) => {
+        const btn = gradeContainer.querySelector('button[title="' + key + '"]');
+        if (!btn) return;
+        if (btn.querySelector('kbd.' + KBD_CLASS)) return;
+        const kbd = document.createElement('kbd');
+        kbd.className = KBD_CLASS;
+        kbd.textContent = key;
+        btn.insertBefore(kbd, btn.firstChild);
+      });
+    }
+
+    // And an Esc badge on the menu's "anki mode" link, since the Escape
+    // key navigates there. Also shorten its text to just "anki" so the
+    // badge + label stay centered on a single line in the menu.
+    document.querySelectorAll('a[href="/learn"]').forEach((link) => {
+      link.childNodes.forEach((node) => {
+        if (node.nodeType === Node.TEXT_NODE && node.data.includes('anki mode')) {
+          node.data = node.data.replace('anki mode', 'anki');
+        }
+      });
+      if (link.querySelector('kbd.' + KBD_CLASS)) return;
+      const kbd = document.createElement('kbd');
+      kbd.className = KBD_CLASS;
+      kbd.textContent = 'Esc';
+      link.insertBefore(kbd, link.firstChild);
+    });
+  }
 
   function openQuizListRow(index) {
     // Select by row (each row contains multiple ?learn links: the title
@@ -773,34 +853,8 @@
     }
   }
 
-  // Unified action for the panel's 1-4 buttons: mirrors the keyboard
-  // priority chain (overlay > end-of-quiz nav > grading > quiz list).
   function findQuizListTable() {
     return document.querySelector('.learn-module__VSVJQa__table');
-  }
-
-  function updateNumButtonsVisibility() {
-    if (!numButtonsEl) return;
-    numButtonsEl.style.display = findQuizListTable() ? 'flex' : 'none';
-  }
-
-  function performNumberAction(key) {
-    if (overlayEl) {
-      if (key === '1') proceedFromOverlay();
-      return;
-    }
-    const navBtn = findNavButtonBySymbol(NAV_KEY_SYMBOL_MAP[key]);
-    if (navBtn) {
-      navBtn.click();
-      return;
-    }
-    const gradeContainer = document.querySelector('.generic-quiz-module__m31QtG__controlButtonsAnki');
-    const gradeBtn = gradeContainer && gradeContainer.querySelector('button[title="' + key + '"]');
-    if (gradeBtn) {
-      gradeBtn.click();
-      return;
-    }
-    openQuizListRow(QUIZ_LIST_KEY_INDEX[key]);
   }
 
   // ---------- Nav-button keyboard shortcuts (end-of-quiz screen) ----------
@@ -839,6 +893,22 @@
     e.preventDefault();
     if (DEBUG) console.log('[helloquiz-timer] nav key', e.key, '->', symbol);
     button.click();
+  }
+
+  function onEscapeKeydown(e) {
+    if (!scriptActive) return;
+    if (e.key !== 'Escape') return;
+    const tag = (document.activeElement || {}).tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (location.pathname === '/learn') return; // already there
+
+    e.preventDefault();
+    if (DEBUG) console.log('[helloquiz-timer] Escape -> /learn');
+    // Prefer clicking an existing /learn link for a smooth SPA transition;
+    // fall back to a full navigation if none is on the page.
+    const learnLink = document.querySelector('a[href="/learn"]');
+    if (learnLink) learnLink.click();
+    else location.assign('https://helloquiz.app/learn');
   }
 
   // ---------- Control panel ----------
@@ -919,40 +989,12 @@
       }
     });
 
-    const numButtons = document.createElement('div');
-    numButtons.style.cssText = 'display:flex; gap:4px;';
-    ['1', '2', '3', '4'].forEach((key) => {
-      const numBtn = document.createElement('button');
-      numBtn.textContent = key;
-      numBtn.title = 'open quiz #' + key + ' in the list (same as pressing key ' + key + ')';
-      numBtn.style.cssText = `
-        width: 26px;
-        padding: 3px 0;
-        border-radius: 4px;
-        border: 1px solid #666;
-        cursor: pointer;
-        font-weight: 600;
-        background: #444;
-        color: #fff;
-      `;
-      numBtn.addEventListener('click', () => performNumberAction(key));
-      numButtons.appendChild(numBtn);
-    });
-    numButtonsEl = numButtons;
-    updateNumButtonsVisibility();
 
     label.appendChild(input);
-    panel.appendChild(numButtons);
     panel.appendChild(label);
     panel.appendChild(toggleBtn);
     document.body.appendChild(panel);
     panelEl = panel;
-
-    // If a review button was showing when the panel got recreated,
-    // re-attach it so it isn't lost.
-    if (overlayEl) {
-      panel.insertBefore(overlayEl, panel.firstChild);
-    }
   }
 
   // ---------- Init ----------
@@ -969,6 +1011,7 @@
     document.addEventListener('keydown', onOverlayKeydown, true);
     document.addEventListener('keydown', onNavKeydown, true);
     document.addEventListener('keydown', onQuizListKeydown, true);
+    document.addEventListener('keydown', onEscapeKeydown, true);
     document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('focus', onWindowFocus);
@@ -983,7 +1026,8 @@
       if (!panelEl || !document.body.contains(panelEl)) {
         makeControlPanel();
       }
-      updateNumButtonsVisibility();
+      ensureListKbdHints();
+      ensureNavKbdHints();
       ensureHideStyle();
       hideQuestion(); // re-assert the <html> class in case it was stripped
       ensureMirror();
